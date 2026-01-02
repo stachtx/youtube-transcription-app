@@ -206,7 +206,7 @@ def fetch_transcript_from_youtube(video_id: str, languages: List[str], request_i
 
     ytt_api = YouTubeTranscriptApi(
         proxy_config=WebshareProxyConfig(
-            proxy_username="spamiic@outlook.com",
+            proxy_username=os.getenv("PROXY_USER"),
             proxy_password=os.getenv("PROXY_PASSWORD"),
         )
     )
