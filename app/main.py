@@ -3,7 +3,7 @@ import time
 import hashlib
 from typing import List, Optional, Dict, Any, Tuple
 
-from fastapi import FastAPI, HTTPException, Query, Header
+from fastapi import FastAPI, HTTPException, Query
 from psycopg_pool import ConnectionPool
 from youtube_transcript_api import YouTubeTranscriptApi
 
@@ -14,9 +14,6 @@ from youtube_transcript_api import YouTubeTranscriptApi
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("Missing DATABASE_URL env var")
-
-# Opcjonalny klucz do zabezpieczenia endpointów
-API_KEY = os.getenv("API_KEY")  # jeśli ustawisz, wymagamy nagłówka X-API-Key
 
 # Throttle (żeby rzadziej łapać blokady YT)
 YT_MIN_INTERVAL_SECONDS = float(os.getenv("YT_MIN_INTERVAL_SECONDS", "25"))
@@ -62,11 +59,6 @@ def startup() -> None:
 # =========================
 # Helpers
 # =========================
-def require_api_key(x_api_key: Optional[str]) -> None:
-    if API_KEY and x_api_key != API_KEY:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-
 def normalize_languages(languages: List[str]) -> Tuple[List[str], str]:
     cleaned: List[str] = []
     seen = set()
@@ -158,15 +150,12 @@ def transcript(
     languages: List[str] = Query(default=["pl", "en"]),
     format: str = "text",
     force: bool = False,
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ) -> Dict[str, Any]:
     """
     Cache transkryptów w Postgres (Railway).
     - Jeśli jest w DB -> cached=true
     - Jeśli brak -> pobiera z YT, zapisuje, cached=false
     """
-    require_api_key(x_api_key)
-
     langs, langs_key = normalize_languages(languages)
     fmt = (format or "").strip().lower()
 
@@ -204,13 +193,8 @@ def transcript(
 
 
 @app.post("/cleanup")
-def cleanup(
-    keep_days: int = 60,
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-) -> Dict[str, Any]:
+def cleanup(keep_days: int = 60) -> Dict[str, Any]:
     """Opcjonalnie: czyści stare transkrypty."""
-    require_api_key(x_api_key)
-
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
