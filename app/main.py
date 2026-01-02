@@ -92,6 +92,20 @@ CREATE TABLE IF NOT EXISTS transcript_cache (
 
 CREATE INDEX IF NOT EXISTS idx_transcript_fetched_at
 ON transcript_cache(fetched_at);
+
+CREATE TABLE IF NOT EXISTS preanalysis_cache (
+  video_id TEXT NOT NULL,
+  transcript_hash TEXT NOT NULL,
+  model TEXT NOT NULL,
+  granularity TEXT NOT NULL,      -- <- to Twoje "barny" (np. "short", "full", "v1")
+  prompt_version INT NOT NULL,    -- wersja promptu
+  analysis JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (video_id, transcript_hash, model, granularity, prompt_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_preanalysis_created_at
+ON preanalysis_cache(created_at);
 """
 
 
