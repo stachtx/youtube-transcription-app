@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.proxies import WebshareProxyConfig
 
 # =========================
 # Logging
@@ -202,8 +203,15 @@ def fetch_transcript_from_youtube(video_id: str, languages: List[str], request_i
     yt_throttle(request_id)
 
     t0 = time.time()
+
+    ytt_api = YouTubeTranscriptApi(
+        proxy_config=WebshareProxyConfig(
+            proxy_username="spamiic@outlook.com",
+            proxy_password=os.getenv("PROXY_PASSWORD"),
+        )
+    )
     try:
-        fetched = YouTubeTranscriptApi().fetch(video_id, languages=languages)
+        fetched = ytt_api.fetch(video_id, languages=languages)
         # fetched jest iterable po snippetach z .text
         text = "\n".join([snip.text for snip in fetched]).strip()
     except Exception as e:
