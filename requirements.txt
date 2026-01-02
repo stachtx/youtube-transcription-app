@@ -1,3 +1,4 @@
 fastapi==0.115.6
-uvicorn[standard]==0.30.6
+uvicorn[standard]==0.34.0
+psycopg[binary,pool]==3.2.4
 youtube-transcript-api==1.2.3
