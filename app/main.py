@@ -351,7 +351,7 @@ def transcript(
     languages: List[str] = Query(default=["pl", "en"]),
     format: str = "text",
     force: bool = False,
-    publishedAt: Optional[str] = None,  # NEW
+    publishedAt: Optional[str] = None,
 ) -> Dict[str, Any]:
     request_id = request.headers.get("X-Request-ID") or "no-request-id"
     langs, langs_key = normalize_languages(languages)
@@ -395,7 +395,7 @@ def transcript(
     db_upsert_transcript(video_id, langs_key, fmt, content, h, title, publishedAt, request_id)
 
     return {
-        "videoId": video_id,
+        "video_id": video_id,
         "title": title,
         "publishedAt": publishedAt,
         "languages": langs,
