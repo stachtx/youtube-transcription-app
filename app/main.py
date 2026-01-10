@@ -5,6 +5,7 @@ import logging
 import uuid
 from typing import List, Optional, Dict, Any, Tuple
 
+import requests
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from psycopg_pool import ConnectionPool
@@ -86,9 +87,14 @@ CREATE TABLE IF NOT EXISTS transcript_cache (
   format TEXT NOT NULL,
   content TEXT NOT NULL,
   transcript_hash TEXT NOT NULL,
+  video_title TEXT, -- NEW
   fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (video_id, languages_key, format)
 );
+
+-- Safe migration if table already exists
+ALTER TABLE transcript_cache
+  ADD COLUMN IF NOT EXISTS video_title TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_transcript_fetched_at
 ON transcript_cache(fetched_at);
@@ -116,7 +122,6 @@ def startup() -> None:
         with conn.cursor() as cur:
             cur.execute(CREATE_TABLES_SQL)
     logger.info("startup done (db initialized)")
-
 
 # =========================
 # Helpers
@@ -154,13 +159,64 @@ def yt_throttle(request_id: str) -> None:
     _last_yt_call_ts = time.time()
 
 
-def db_get_transcript(video_id: str, languages_key: str, fmt: str, request_id: str) -> Optional[Dict[str, Any]]:
+def fetch_video_title(video_id: str, request_id: str) -> Optional[str]:
+    """
+    Pobiera tytuł filmu przez YouTube oEmbed (bez API key).
+    """
+    # Opcjonalnie: użyj throttlingu żeby nie spamować
+    yt_throttle(request_id)
+
+    t0 = time.time()
+    url = "https://www.youtube.com/oembed"
+    params = {"url": f"https://www.youtube.com/watch?v={video_id}", "format": "json"}
+
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code != 200:
+            logger.info(
+                "yt_oembed non_200 status=%s video_id=%s request_id=%s",
+                r.status_code,
+                video_id,
+                request_id,
+            )
+            return None
+
+        data = r.json()
+        title = (data.get("title") or "").strip()
+
+        ms = int((time.time() - t0) * 1000)
+        logger.info(
+            "yt_oembed done ms=%s video_id=%s title_len=%s request_id=%s",
+            ms,
+            video_id,
+            len(title),
+            request_id,
+        )
+        return title or None
+    except Exception as e:
+        ms = int((time.time() - t0) * 1000)
+        logger.info(
+            "yt_oembed failed ms=%s video_id=%s request_id=%s err=%s",
+            ms,
+            video_id,
+            request_id,
+            repr(e),
+        )
+        return None
+
+
+def db_get_transcript(
+    video_id: str,
+    languages_key: str,
+    fmt: str,
+    request_id: str
+) -> Optional[Dict[str, Any]]:
     t0 = time.time()
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT content, transcript_hash, fetched_at
+                SELECT content, transcript_hash, fetched_at, video_title
                 FROM transcript_cache
                 WHERE video_id=%s AND languages_key=%s AND format=%s
                 """,
@@ -181,21 +237,33 @@ def db_get_transcript(video_id: str, languages_key: str, fmt: str, request_id: s
 
     if not row:
         return None
-    return {"content": row[0], "hash": row[1], "fetched_at": row[2]}
+    return {"content": row[0], "hash": row[1], "fetched_at": row[2], "title": row[3]}
 
 
-def db_upsert_transcript(video_id: str, languages_key: str, fmt: str, content: str, h: str, request_id: str) -> None:
+def db_upsert_transcript(
+    video_id: str,
+    languages_key: str,
+    fmt: str,
+    content: str,
+    h: str,
+    title: Optional[str],
+    request_id: str
+) -> None:
     t0 = time.time()
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO transcript_cache(video_id, languages_key, format, content, transcript_hash)
-                VALUES (%s,%s,%s,%s,%s)
+                INSERT INTO transcript_cache(video_id, languages_key, format, content, transcript_hash, video_title)
+                VALUES (%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (video_id, languages_key, format)
-                DO UPDATE SET content=EXCLUDED.content, transcript_hash=EXCLUDED.transcript_hash, fetched_at=now()
+                DO UPDATE SET
+                  content=EXCLUDED.content,
+                  transcript_hash=EXCLUDED.transcript_hash,
+                  video_title=COALESCE(EXCLUDED.video_title, transcript_cache.video_title),
+                  fetched_at=now()
                 """,
-                (video_id, languages_key, fmt, content, h),
+                (video_id, languages_key, fmt, content, h, title),
             )
     ms = int((time.time() - t0) * 1000)
     logger.info(
@@ -255,7 +323,6 @@ def fetch_transcript_from_youtube(video_id: str, languages: List[str], request_i
         raise HTTPException(status_code=404, detail="Transcript is empty or not available")
     return text
 
-
 # =========================
 # Endpoints
 # =========================
@@ -267,7 +334,7 @@ def health() -> Dict[str, str]:
 @app.get("/transcript")
 def transcript(
     request: Request,
-    video: str,
+    video_id: str,
     languages: List[str] = Query(default=["pl", "en"]),
     format: str = "text",
     force: bool = False,
@@ -278,7 +345,7 @@ def transcript(
 
     logger.info(
         "transcript_request video_id=%s languages=%s languages_key=%s format=%s force=%s request_id=%s",
-        video,
+        video_id,
         langs,
         langs_key,
         fmt,
@@ -290,10 +357,11 @@ def transcript(
         raise HTTPException(status_code=400, detail="Only format=text is supported for now")
 
     if not force:
-        cached = db_get_transcript(video, langs_key, fmt, request_id)
+        cached = db_get_transcript(video_id, langs_key, fmt, request_id)
         if cached:
             return {
-                "videoId": video,
+                "video_id": video_id,
+                "title": cached.get("title"),  # NEW
                 "languages": langs,
                 "languages_key": langs_key,
                 "format": fmt,
@@ -305,12 +373,14 @@ def transcript(
             }
 
     # cache miss / force
-    content = fetch_transcript_from_youtube(video, langs, request_id)
+    title = fetch_video_title(video_id, request_id)  # NEW
+    content = fetch_transcript_from_youtube(video_id, langs, request_id)
     h = sha256_text(content)
-    db_upsert_transcript(video, langs_key, fmt, content, h, request_id)
+    db_upsert_transcript(video_id, langs_key, fmt, content, h, title, request_id)
 
     return {
-        "videoId": video,
+        "videoId": video_id,
+        "title": title,  # NEW
         "languages": langs,
         "languages_key": langs_key,
         "format": fmt,
