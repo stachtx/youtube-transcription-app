@@ -87,7 +87,8 @@ CREATE TABLE IF NOT EXISTS transcript_cache (
   format TEXT NOT NULL,
   content TEXT NOT NULL,
   transcript_hash TEXT NOT NULL,
-  video_title TEXT, -- NEW
+  video_title TEXT,
+  published_at TIMESTAMPTZ, -- NEW
   fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (video_id, languages_key, format)
 );
@@ -96,8 +97,14 @@ CREATE TABLE IF NOT EXISTS transcript_cache (
 ALTER TABLE transcript_cache
   ADD COLUMN IF NOT EXISTS video_title TEXT;
 
+ALTER TABLE transcript_cache
+  ADD COLUMN IF NOT EXISTS published_at TIMESTAMPTZ;
+
 CREATE INDEX IF NOT EXISTS idx_transcript_fetched_at
 ON transcript_cache(fetched_at);
+
+CREATE INDEX IF NOT EXISTS idx_transcript_published_at
+ON transcript_cache(published_at);
 
 CREATE TABLE IF NOT EXISTS preanalysis_cache (
   video_id TEXT NOT NULL,
@@ -113,7 +120,6 @@ CREATE TABLE IF NOT EXISTS preanalysis_cache (
 CREATE INDEX IF NOT EXISTS idx_preanalysis_created_at
 ON preanalysis_cache(created_at);
 """
-
 
 @app.on_event("startup")
 def startup() -> None:
@@ -163,7 +169,6 @@ def fetch_video_title(video_id: str, request_id: str) -> Optional[str]:
     """
     Pobiera tytuł filmu przez YouTube oEmbed (bez API key).
     """
-    # Opcjonalnie: użyj throttlingu żeby nie spamować
     yt_throttle(request_id)
 
     t0 = time.time()
@@ -216,7 +221,7 @@ def db_get_transcript(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT content, transcript_hash, fetched_at, video_title
+                SELECT content, transcript_hash, fetched_at, video_title, published_at
                 FROM transcript_cache
                 WHERE video_id=%s AND languages_key=%s AND format=%s
                 """,
@@ -237,7 +242,13 @@ def db_get_transcript(
 
     if not row:
         return None
-    return {"content": row[0], "hash": row[1], "fetched_at": row[2], "title": row[3]}
+    return {
+        "content": row[0],
+        "hash": row[1],
+        "fetched_at": row[2],
+        "title": row[3],
+        "published_at": row[4],
+    }
 
 
 def db_upsert_transcript(
@@ -247,6 +258,7 @@ def db_upsert_transcript(
     content: str,
     h: str,
     title: Optional[str],
+    published_at: Optional[str],  # NEW
     request_id: str
 ) -> None:
     t0 = time.time()
@@ -254,16 +266,19 @@ def db_upsert_transcript(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO transcript_cache(video_id, languages_key, format, content, transcript_hash, video_title)
-                VALUES (%s,%s,%s,%s,%s,%s)
+                INSERT INTO transcript_cache(
+                  video_id, languages_key, format, content, transcript_hash, video_title, published_at
+                )
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (video_id, languages_key, format)
                 DO UPDATE SET
                   content=EXCLUDED.content,
                   transcript_hash=EXCLUDED.transcript_hash,
                   video_title=COALESCE(EXCLUDED.video_title, transcript_cache.video_title),
+                  published_at=COALESCE(EXCLUDED.published_at, transcript_cache.published_at),
                   fetched_at=now()
                 """,
-                (video_id, languages_key, fmt, content, h, title),
+                (video_id, languages_key, fmt, content, h, title, published_at),
             )
     ms = int((time.time() - t0) * 1000)
     logger.info(
@@ -294,7 +309,6 @@ def fetch_transcript_from_youtube(video_id: str, languages: List[str], request_i
     )
     try:
         fetched = ytt_api.fetch(video_id, languages=languages)
-        # fetched jest iterable po snippetach z .text
         text = "\n".join([snip.text for snip in fetched]).strip()
     except Exception as e:
         ms = int((time.time() - t0) * 1000)
@@ -306,7 +320,6 @@ def fetch_transcript_from_youtube(video_id: str, languages: List[str], request_i
             request_id,
             repr(e),
         )
-        # 429 bo w praktyce to często blokady/rate-limit, ale może być też brak napisów
         raise HTTPException(status_code=429, detail=f"YouTube transcript blocked/rate-limited: {e}")
 
     ms = int((time.time() - t0) * 1000)
@@ -338,18 +351,20 @@ def transcript(
     languages: List[str] = Query(default=["pl", "en"]),
     format: str = "text",
     force: bool = False,
+    publishedAt: Optional[str] = None,  # NEW
 ) -> Dict[str, Any]:
     request_id = request.headers.get("X-Request-ID") or "no-request-id"
     langs, langs_key = normalize_languages(languages)
     fmt = (format or "").strip().lower()
 
     logger.info(
-        "transcript_request video_id=%s languages=%s languages_key=%s format=%s force=%s request_id=%s",
+        "transcript_request video_id=%s languages=%s languages_key=%s format=%s force=%s publishedAt=%s request_id=%s",
         video_id,
         langs,
         langs_key,
         fmt,
         force,
+        publishedAt,
         request_id,
     )
 
@@ -361,7 +376,8 @@ def transcript(
         if cached:
             return {
                 "video_id": video_id,
-                "title": cached.get("title"),  # NEW
+                "title": cached.get("title"),
+                "publishedAt": str(cached["published_at"]) if cached.get("published_at") else None,
                 "languages": langs,
                 "languages_key": langs_key,
                 "format": fmt,
@@ -373,14 +389,15 @@ def transcript(
             }
 
     # cache miss / force
-    title = fetch_video_title(video_id, request_id)  # NEW
+    title = fetch_video_title(video_id, request_id)
     content = fetch_transcript_from_youtube(video_id, langs, request_id)
     h = sha256_text(content)
-    db_upsert_transcript(video_id, langs_key, fmt, content, h, title, request_id)
+    db_upsert_transcript(video_id, langs_key, fmt, content, h, title, publishedAt, request_id)
 
     return {
         "videoId": video_id,
-        "title": title,  # NEW
+        "title": title,
+        "publishedAt": publishedAt,
         "languages": langs,
         "languages_key": langs_key,
         "format": fmt,
