@@ -408,7 +408,7 @@ def transcript(
     }
 
 
-@app.post("/cleanup")
+@app.post("/cleanup-transcriptions")
 def cleanup(request: Request, keep_days: int = 60) -> Dict[str, Any]:
     request_id = request.headers.get("X-Request-ID") or "no-request-id"
     t0 = time.time()
@@ -423,4 +423,21 @@ def cleanup(request: Request, keep_days: int = 60) -> Dict[str, Any]:
 
     ms = int((time.time() - t0) * 1000)
     logger.info("cleanup done deleted=%s keep_days=%s ms=%s request_id=%s", deleted, keep_days, ms, request_id)
+    return {"status": "ok", "deleted": deleted, "request_id": request_id}
+
+@app.post("/cleanup-preanalysis")
+def cleanup_preanalysis(request: Request, keep_days: int = 60) -> Dict[str, Any]:
+    request_id = request.headers.get("X-Request-ID") or "no-request-id"
+    t0 = time.time()
+
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM preanalysis_cache WHERE created_at < now() - (%s || ' days')::interval",
+                (keep_days,),
+            )
+            deleted = cur.rowcount
+
+    ms = int((time.time() - t0) * 1000)
+    logger.info("preanalysis cleanup done deleted=%s keep_days=%s ms=%s request_id=%s", deleted, keep_days, ms, request_id)
     return {"status": "ok", "deleted": deleted, "request_id": request_id}
