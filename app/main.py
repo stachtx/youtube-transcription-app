@@ -223,9 +223,9 @@ def db_get_transcript(
                 """
                 SELECT content, transcript_hash, fetched_at, video_title, published_at
                 FROM transcript_cache
-                WHERE video_id=%s AND languages_key=%s AND format=%s
+                WHERE video_id=%s AND format=%s
                 """,
-                (video_id, languages_key, fmt),
+                (video_id, fmt),
             )
             row = cur.fetchone()
 
