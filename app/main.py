@@ -425,6 +425,7 @@ def cleanup(request: Request, keep_days: int = 60) -> Dict[str, Any]:
     logger.info("cleanup done deleted=%s keep_days=%s ms=%s request_id=%s", deleted, keep_days, ms, request_id)
     return {"status": "ok", "deleted": deleted, "request_id": request_id}
 
+
 @app.post("/cleanup-preanalysis")
 def cleanup_preanalysis(request: Request, keep_days: int = 60) -> Dict[str, Any]:
     request_id = request.headers.get("X-Request-ID") or "no-request-id"
